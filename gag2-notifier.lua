@@ -1,15 +1,13 @@
 -- ================================================
---          GAG2 STOCK NOTIFIER
+--          GAG2 STOCK NOTIFIER v2
 --    Seed | Gear | Props | Weather
+--    Fixed: HTTP, UI, drag, minimize, loop control
 -- ================================================
 
 -- ================================================
 -- PER-ITEM ROLE PINGS
--- Fill in your role IDs for each item you want
--- to ping. Leave as "" to use the default ping.
 -- ================================================
 local ROLE_PINGS = {
-    -- SEEDS
     ["Carrot"]             = "<@&YOUR_ROLE_ID>",
     ["Strawberry"]         = "<@&YOUR_ROLE_ID>",
     ["Blueberry"]          = "<@&YOUR_ROLE_ID>",
@@ -25,7 +23,6 @@ local ROLE_PINGS = {
     ["Mango"]              = "<@&YOUR_ROLE_ID>",
     ["Grape"]              = "<@&YOUR_ROLE_ID>",
     ["Mushroom"]           = "<@&YOUR_ROLE_ID>",
-    -- GEARS
     ["Common Watering Can"]   = "<@&YOUR_ROLE_ID>",
     ["Common Sprinkler"]      = "<@&YOUR_ROLE_ID>",
     ["Master Sprinkler"]      = "<@&YOUR_ROLE_ID>",
@@ -33,11 +30,9 @@ local ROLE_PINGS = {
     ["Trowel"]                = "<@&YOUR_ROLE_ID>",
     ["Recall Wrench"]         = "<@&YOUR_ROLE_ID>",
     ["Favorite Tool"]         = "<@&YOUR_ROLE_ID>",
-    -- PROPS
     ["Ladder Crate"]       = "<@&YOUR_ROLE_ID>",
     ["Bench Crate"]        = "<@&YOUR_ROLE_ID>",
     ["Light Crate"]        = "<@&YOUR_ROLE_ID>",
-    -- WEATHER
     ["Rain"]               = "<@&YOUR_ROLE_ID>",
     ["Lightning"]          = "<@&YOUR_ROLE_ID>",
     ["Bloodmoon"]          = "<@&YOUR_ROLE_ID>",
@@ -47,16 +42,32 @@ local ROLE_PINGS = {
     ["Rainbow"]            = "<@&YOUR_ROLE_ID>",
 }
 
-local DEFAULT_PING = "@everyone"
+local DEFAULT_PING  = "@everyone"
 local SCAN_INTERVAL = 15
 
 -- ================================================
 -- SERVICES
 -- ================================================
-local Players      = game:GetService("Players")
-local HttpService  = game:GetService("HttpService")
-local LocalPlayer  = Players.LocalPlayer
-local PlayerGui    = LocalPlayer.PlayerGui
+local Players          = game:GetService("Players")
+local HttpService      = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local LocalPlayer      = Players.LocalPlayer
+local PlayerGui        = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ================================================
+-- FIX 1: EXECUTOR-SAFE HTTP (replaces PostAsync)
+-- ================================================
+local function httpRequest(options)
+    if syn and syn.request         then return syn.request(options)
+    elseif http and http.request   then return http.request(options)
+    elseif http_request            then return http_request(options)
+    elseif request                 then return request(options)
+    else
+        warn("[GAG2] No HTTP function available in this executor!")
+        return nil
+    end
+end
 
 -- ================================================
 -- WEBHOOK STORAGE
@@ -70,43 +81,57 @@ end
 
 local function loadWebhook()
     local ok, data = pcall(function() return readfile("gag2_webhook.txt") end)
-    if ok and data and data ~= "" then WEBHOOK_URL = data end
-    return WEBHOOK_URL
+    if ok and data and data ~= "" then
+        WEBHOOK_URL = data
+        return data
+    end
+    return ""
 end
 
 -- ================================================
 -- WEBHOOK SENDER
 -- ================================================
 local function getPing(name)
+    if not name or name == "" then return DEFAULT_PING end
     return ROLE_PINGS[name] or DEFAULT_PING
 end
 
 local function sendWebhook(title, description, color, pingName)
     if WEBHOOK_URL == "" then
         warn("[GAG2 Notifier] No webhook URL set!")
-        return
+        return false
     end
     local data = {
         content = getPing(pingName or ""),
         embeds = {{
-            title = title,
+            title       = title,
             description = description,
-            color = color or 5763719,
-            footer = { text = "GAG2 Notifier • " .. os.date("%X") }
+            color       = color or 5763719,
+            footer      = { text = "GAG2 Notifier v2 • " .. os.date("%X") }
         }}
     }
     local ok, err = pcall(function()
-        HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(data), Enum.HttpContentType.ApplicationJson)
+        httpRequest({
+            Url     = WEBHOOK_URL,
+            Method  = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body    = HttpService:JSONEncode(data),
+        })
     end)
     if not ok then warn("[GAG2 Notifier] Webhook error: " .. tostring(err)) end
+    return ok
 end
 
 local function testWebhook()
-    sendWebhook("✅ GAG2 Notifier Connected!", "Webhook is working! You will now receive stock & weather alerts.", 3066993, "")
+    return sendWebhook(
+        "✅ GAG2 Notifier v2 Connected!",
+        "Webhook is working! You will now receive stock & weather alerts.",
+        3066993, ""
+    )
 end
 
 -- ================================================
--- COLORS PER RARITY
+-- RARITY COLORS
 -- ================================================
 local rarityColors = {
     Common    = 9807270,
@@ -132,6 +157,7 @@ end
 local lastSeedStock  = {}
 local lastGearStock  = {}
 local lastPropsStock = {}
+-- FIX 4: weather resets when weather ends, so alerts re-fire next time
 local lastWeather    = {}
 
 -- ================================================
@@ -152,14 +178,20 @@ local function scanSeedShop()
 
     local restocked = {}
     for _, item in pairs(shop:GetChildren()) do
-        if item.Name == "ItemTemplate" or item.Name == "Sheckles_Shelf" or item.Name == "Robux_Shelf" then continue end
+        if item.Name == "ItemTemplate"
+        or item.Name == "Sheckles_Shelf"
+        or item.Name == "Robux_Shelf" then continue end
+
         local mf = item:FindFirstChild("Main_Frame")
         if not mf then continue end
-        local name   = mf:FindFirstChild("Seed_Text") and mf.Seed_Text.Text or item.Name
-        local cost   = mf:FindFirstChild("Cost_Text") and mf.Cost_Text.Text or "?"
-        local rarity = mf:FindFirstChild("Rarity") and mf.Rarity:FindFirstChild("Rarity_Text") and mf.Rarity.Rarity_Text.Text or "?"
-        local stock  = mf:FindFirstChild("Stock_Text") and mf.Stock_Text.Text or "?"
+        local name   = mf:FindFirstChild("Seed_Text")   and mf.Seed_Text.Text   or item.Name
+        local cost   = mf:FindFirstChild("Cost_Text")   and mf.Cost_Text.Text   or "?"
+        local rarity = mf:FindFirstChild("Rarity")
+            and mf.Rarity:FindFirstChild("Rarity_Text")
+            and mf.Rarity.Rarity_Text.Text or "?"
+        local stock  = mf:FindFirstChild("Stock_Text")  and mf.Stock_Text.Text  or "?"
         local inStock = cost ~= "NO STOCK" and cost ~= "SOLD OUT" and cost ~= "OWNED"
+
         if inStock and not lastSeedStock[name] then
             table.insert(restocked, {name=name, cost=cost, rarity=rarity, stock=stock})
         end
@@ -172,7 +204,7 @@ local function scanSeedShop()
         for _, item in ipairs(restocked) do
             desc = desc .. "🌱 **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color = getColor(item.rarity)
+            color    = getColor(item.rarity)
             pingName = item.name
         end
         sendWebhook("🌱 Seed Shop Restocked!", desc, color, pingName)
@@ -197,14 +229,20 @@ local function scanGearShop()
 
     local restocked = {}
     for _, item in pairs(shop:GetChildren()) do
-        if item.Name == "ItemTemplate" or item.Name == "Sheckles_Shelf" or item.Name == "Robux_Shelf" then continue end
+        if item.Name == "ItemTemplate"
+        or item.Name == "Sheckles_Shelf"
+        or item.Name == "Robux_Shelf" then continue end
+
         local mf = item:FindFirstChild("Main_Frame")
         if not mf then continue end
-        local name   = mf:FindFirstChild("Seed_Text") and mf.Seed_Text.Text or item.Name
-        local cost   = mf:FindFirstChild("Cost_Text") and mf.Cost_Text.Text or "?"
-        local rarity = mf:FindFirstChild("Rarity") and mf.Rarity:FindFirstChild("Rarity_Text") and mf.Rarity.Rarity_Text.Text or "?"
+        local name   = mf:FindFirstChild("Seed_Text")  and mf.Seed_Text.Text  or item.Name
+        local cost   = mf:FindFirstChild("Cost_Text")  and mf.Cost_Text.Text  or "?"
+        local rarity = mf:FindFirstChild("Rarity")
+            and mf.Rarity:FindFirstChild("Rarity_Text")
+            and mf.Rarity.Rarity_Text.Text or "?"
         local stock  = mf:FindFirstChild("Stock_Text") and mf.Stock_Text.Text or "?"
         local inStock = cost ~= "NO STOCK" and cost ~= "SOLD OUT" and cost ~= "OWNED"
+
         if inStock and not lastGearStock[name] then
             table.insert(restocked, {name=name, cost=cost, rarity=rarity, stock=stock})
         end
@@ -217,7 +255,7 @@ local function scanGearShop()
         for _, item in ipairs(restocked) do
             desc = desc .. "⚙️ **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color = getColor(item.rarity)
+            color    = getColor(item.rarity)
             pingName = item.name
         end
         sendWebhook("⚙️ Gear Shop Restocked!", desc, color, pingName)
@@ -242,14 +280,20 @@ local function scanPropsShop()
 
     local restocked = {}
     for _, item in pairs(shop:GetChildren()) do
-        if item.Name == "ItemTemplate" or item.Name == "Sheckles_Shelf" or item.Name == "Robux_Shelf" then continue end
+        if item.Name == "ItemTemplate"
+        or item.Name == "Sheckles_Shelf"
+        or item.Name == "Robux_Shelf" then continue end
+
         local mf = item:FindFirstChild("Main_Frame")
         if not mf then continue end
-        local name   = mf:FindFirstChild("Seed_Text") and mf.Seed_Text.Text or item.Name
-        local cost   = mf:FindFirstChild("Cost_Text") and mf.Cost_Text.Text or "?"
-        local rarity = mf:FindFirstChild("Rarity") and mf.Rarity:FindFirstChild("Rarity_Text") and mf.Rarity.Rarity_Text.Text or "?"
+        local name   = mf:FindFirstChild("Seed_Text")  and mf.Seed_Text.Text  or item.Name
+        local cost   = mf:FindFirstChild("Cost_Text")  and mf.Cost_Text.Text  or "?"
+        local rarity = mf:FindFirstChild("Rarity")
+            and mf.Rarity:FindFirstChild("Rarity_Text")
+            and mf.Rarity.Rarity_Text.Text or "?"
         local stock  = mf:FindFirstChild("Stock_Text") and mf.Stock_Text.Text or "?"
         local inStock = cost ~= "NO STOCK" and cost ~= "SOLD OUT" and cost ~= "OWNED"
+
         if inStock and not lastPropsStock[name] then
             table.insert(restocked, {name=name, cost=cost, rarity=rarity, stock=stock})
         end
@@ -262,7 +306,7 @@ local function scanPropsShop()
         for _, item in ipairs(restocked) do
             desc = desc .. "🏠 **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color = getColor(item.rarity)
+            color    = getColor(item.rarity)
             pingName = item.name
         end
         sendWebhook("🏠 Props Shop Restocked!", desc, color, pingName)
@@ -271,10 +315,11 @@ end
 
 -- ================================================
 -- SCAN: WEATHER
+-- FIX 4: track when weather ENDS so it re-alerts next cycle
 -- ================================================
 local weatherEmojis = {
-    Rain = "🌧️", Lightning = "⚡", Bloodmoon = "🩸",
-    Snowfall = "❄️", Night = "🌙", Starfall = "⭐", Rainbow = "🌈",
+    Rain="🌧️", Lightning="⚡", Bloodmoon="🩸",
+    Snowfall="❄️", Night="🌙", Starfall="⭐", Rainbow="🌈",
 }
 
 local function scanWeather()
@@ -282,197 +327,355 @@ local function scanWeather()
     if not gui then return end
     local frame = gui:FindFirstChild("Frame")
     if not frame then return end
+
     for _, item in pairs(frame:GetChildren()) do
         local nameLabel = item:FindFirstChild("Weather")
         local timeLabel = item:FindFirstChild("Time")
         if not nameLabel or not timeLabel then continue end
-        local name = nameLabel.Text
-        local time = timeLabel.Text
+
+        local name     = nameLabel.Text
+        local time     = timeLabel.Text
         local isActive = time ~= "0s" and time ~= "" and time ~= "0m 0s"
+
         if isActive and not lastWeather[name] then
+            -- weather just started → send alert
             local emoji = weatherEmojis[name] or "🌤️"
-            local desc = emoji .. " **" .. name .. "** is now active!\n⏱️ Duration: **" .. time .. "**"
+            local desc  = emoji .. " **" .. name .. "** is now active!\n⏱️ Duration: **" .. time .. "**"
             sendWebhook(emoji .. " Weather Alert: " .. name .. "!", desc, 15844367, name)
         end
+
+        -- FIX: reset when weather ends so next occurrence re-alerts
         lastWeather[name] = isActive
     end
 end
 
 -- ================================================
--- WEBHOOK GUI
+-- GUI
+-- FIX 2: bigger window, status bar, scan feedback
+-- FIX 3: manual drag (Draggable=true unreliable in exploits)
+-- FIX 5: scanning loop tied to a flag — stops when GUI closes
 -- ================================================
+local scanningActive = false
+local savedUrl = loadWebhook() -- FIX: load BEFORE building GUI
+
 local function createGui()
     local existing = PlayerGui:FindFirstChild("GAG2NotifierGui")
     if existing then existing:Destroy() end
 
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "GAG2NotifierGui"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    ScreenGui.Parent = PlayerGui
+    ScreenGui.Name            = "GAG2NotifierGui"
+    ScreenGui.ResetOnSpawn    = false
+    ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+    ScreenGui.Parent          = PlayerGui
 
+    -- ── Main window ──────────────────────────────
     local Main = Instance.new("Frame")
-    Main.Name = "Main"
-    Main.Size = UDim2.new(0, 340, 0, 220)
-    Main.Position = UDim2.new(0.5, -170, 0.5, -110)
+    Main.Name             = "Main"
+    Main.Size             = UDim2.new(0, 360, 0, 290)
+    Main.Position         = UDim2.new(0.5, -180, 0.5, -145)
     Main.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-    Main.BorderSizePixel = 0
-    Main.Active = true
-    Main.Draggable = true
-    Main.Parent = ScreenGui
+    Main.BorderSizePixel  = 0
+    Main.Parent           = ScreenGui
     Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
     local ms = Instance.new("UIStroke", Main)
-    ms.Color = Color3.fromRGB(60, 200, 100)
+    ms.Color     = Color3.fromRGB(60, 200, 100)
     ms.Thickness = 1.5
 
-    -- Title Bar
+    -- ── Title bar ────────────────────────────────
     local TitleBar = Instance.new("Frame", Main)
-    TitleBar.Size = UDim2.new(1, 0, 0, 40)
+    TitleBar.Size             = UDim2.new(1, 0, 0, 42)
     TitleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-    TitleBar.BorderSizePixel = 0
+    TitleBar.BorderSizePixel  = 0
     Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
+    -- fill bottom half so corners don't show inside the window
     local TFix = Instance.new("Frame", TitleBar)
-    TFix.Size = UDim2.new(1, 0, 0.5, 0)
-    TFix.Position = UDim2.new(0, 0, 0.5, 0)
+    TFix.Size             = UDim2.new(1, 0, 0.5, 0)
+    TFix.Position         = UDim2.new(0, 0, 0.5, 0)
     TFix.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-    TFix.BorderSizePixel = 0
+    TFix.BorderSizePixel  = 0
 
     local Title = Instance.new("TextLabel", TitleBar)
-    Title.Size = UDim2.new(1, -10, 1, 0)
-    Title.Position = UDim2.new(0, 10, 0, 0)
+    Title.Size               = UDim2.new(1, -80, 1, 0)
+    Title.Position           = UDim2.new(0, 12, 0, 0)
     Title.BackgroundTransparency = 1
-    Title.Text = "🌱 GAG2 Notifier"
-    Title.TextColor3 = Color3.fromRGB(60, 200, 100)
-    Title.TextSize = 16
-    Title.Font = Enum.Font.GothamBold
-    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Text               = "🌱 GAG2 Notifier v2"
+    Title.TextColor3         = Color3.fromRGB(60, 200, 100)
+    Title.TextSize           = 15
+    Title.Font               = Enum.Font.GothamBold
+    Title.TextXAlignment     = Enum.TextXAlignment.Left
 
+    -- Minimize button
+    local MinBtn = Instance.new("TextButton", TitleBar)
+    MinBtn.Size             = UDim2.new(0, 28, 0, 28)
+    MinBtn.Position         = UDim2.new(1, -66, 0.5, -14)
+    MinBtn.BackgroundColor3 = Color3.fromRGB(60, 130, 200)
+    MinBtn.Text             = "−"
+    MinBtn.TextColor3       = Color3.new(1,1,1)
+    MinBtn.TextSize         = 16
+    MinBtn.Font             = Enum.Font.GothamBold
+    MinBtn.BorderSizePixel  = 0
+    Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 6)
+
+    -- Close button
     local CloseBtn = Instance.new("TextButton", TitleBar)
-    CloseBtn.Size = UDim2.new(0, 30, 0, 30)
-    CloseBtn.Position = UDim2.new(1, -35, 0, 5)
+    CloseBtn.Size             = UDim2.new(0, 28, 0, 28)
+    CloseBtn.Position         = UDim2.new(1, -34, 0.5, -14)
     CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-    CloseBtn.Text = "✕"
-    CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    CloseBtn.TextSize = 14
-    CloseBtn.Font = Enum.Font.GothamBold
-    CloseBtn.BorderSizePixel = 0
+    CloseBtn.Text             = "✕"
+    CloseBtn.TextColor3       = Color3.new(1,1,1)
+    CloseBtn.TextSize         = 14
+    CloseBtn.Font             = Enum.Font.GothamBold
+    CloseBtn.BorderSizePixel  = 0
     Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
-    CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
 
-    -- Status
-    local StatusLabel = Instance.new("TextLabel", Main)
-    StatusLabel.Size = UDim2.new(1, -20, 0, 20)
-    StatusLabel.Position = UDim2.new(0, 10, 0, 48)
+    -- FIX 5: stop loop when closed
+    CloseBtn.MouseButton1Click:Connect(function()
+        scanningActive = false
+        ScreenGui:Destroy()
+    end)
+
+    -- FIX 2: minimize/restore body
+    local Body = Instance.new("Frame", Main)
+    Body.Size             = UDim2.new(1, 0, 1, -42)
+    Body.Position         = UDim2.new(0, 0, 0, 42)
+    Body.BackgroundTransparency = 1
+
+    local minimized = false
+    MinBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        Body.Visible = not minimized
+        TweenService:Create(Main, TweenInfo.new(0.15), {
+            Size = minimized and UDim2.new(0, 360, 0, 42) or UDim2.new(0, 360, 0, 290)
+        }):Play()
+        MinBtn.Text = minimized and "+" or "−"
+    end)
+
+    -- ── FIX 3: manual drag ───────────────────────
+    do
+        local dragging, dragStart, startPos
+        TitleBar.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging  = true
+                dragStart = input.Position
+                startPos  = Main.Position
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                local delta = input.Position - dragStart
+                Main.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+    end
+
+    -- ── Status bar ───────────────────────────────
+    local StatusLabel = Instance.new("TextLabel", Body)
+    StatusLabel.Size             = UDim2.new(1, -20, 0, 18)
+    StatusLabel.Position         = UDim2.new(0, 10, 0, 8)
     StatusLabel.BackgroundTransparency = 1
-    StatusLabel.Text = "⚪ Not connected"
-    StatusLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-    StatusLabel.TextSize = 13
-    StatusLabel.Font = Enum.Font.Gotham
-    StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    StatusLabel.Text             = "⚪ Not connected"
+    StatusLabel.TextColor3       = Color3.fromRGB(160, 160, 160)
+    StatusLabel.TextSize         = 12
+    StatusLabel.Font             = Enum.Font.Gotham
+    StatusLabel.TextXAlignment   = Enum.TextXAlignment.Left
 
-    -- Webhook Label
-    local WebhookLabel = Instance.new("TextLabel", Main)
-    WebhookLabel.Size = UDim2.new(1, -20, 0, 20)
-    WebhookLabel.Position = UDim2.new(0, 10, 0, 76)
+    -- ── Last scan label ──────────────────────────
+    local ScanLabel = Instance.new("TextLabel", Body)
+    ScanLabel.Size             = UDim2.new(1, -20, 0, 16)
+    ScanLabel.Position         = UDim2.new(0, 10, 0, 28)
+    ScanLabel.BackgroundTransparency = 1
+    ScanLabel.Text             = "🔍 Last scan: waiting..."
+    ScanLabel.TextColor3       = Color3.fromRGB(120, 120, 140)
+    ScanLabel.TextSize         = 11
+    ScanLabel.Font             = Enum.Font.Gotham
+    ScanLabel.TextXAlignment   = Enum.TextXAlignment.Left
+
+    -- ── Webhook label ────────────────────────────
+    local WebhookLabel = Instance.new("TextLabel", Body)
+    WebhookLabel.Size             = UDim2.new(1, -20, 0, 18)
+    WebhookLabel.Position         = UDim2.new(0, 10, 0, 56)
     WebhookLabel.BackgroundTransparency = 1
-    WebhookLabel.Text = "Paste your Discord Webhook URL:"
-    WebhookLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    WebhookLabel.TextSize = 13
-    WebhookLabel.Font = Enum.Font.Gotham
-    WebhookLabel.TextXAlignment = Enum.TextXAlignment.Left
+    WebhookLabel.Text             = "Discord Webhook URL:"
+    WebhookLabel.TextColor3       = Color3.fromRGB(180, 180, 200)
+    WebhookLabel.TextSize         = 12
+    WebhookLabel.Font             = Enum.Font.GothamBold
+    WebhookLabel.TextXAlignment   = Enum.TextXAlignment.Left
 
-    -- Input
-    local InputBg = Instance.new("Frame", Main)
-    InputBg.Size = UDim2.new(1, -20, 0, 36)
-    InputBg.Position = UDim2.new(0, 10, 0, 100)
-    InputBg.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
-    InputBg.BorderSizePixel = 0
+    -- ── Input box ────────────────────────────────
+    local InputBg = Instance.new("Frame", Body)
+    InputBg.Size             = UDim2.new(1, -20, 0, 36)
+    InputBg.Position         = UDim2.new(0, 10, 0, 78)
+    InputBg.BackgroundColor3 = Color3.fromRGB(28, 28, 40)
+    InputBg.BorderSizePixel  = 0
     Instance.new("UICorner", InputBg).CornerRadius = UDim.new(0, 8)
     local InputStroke = Instance.new("UIStroke", InputBg)
-    InputStroke.Color = Color3.fromRGB(60, 60, 80)
+    InputStroke.Color     = Color3.fromRGB(60, 60, 85)
     InputStroke.Thickness = 1
 
     local WebhookInput = Instance.new("TextBox", InputBg)
-    WebhookInput.Size = UDim2.new(1, -16, 1, 0)
-    WebhookInput.Position = UDim2.new(0, 8, 0, 0)
+    WebhookInput.Size             = UDim2.new(1, -16, 1, 0)
+    WebhookInput.Position         = UDim2.new(0, 8, 0, 0)
     WebhookInput.BackgroundTransparency = 1
-    WebhookInput.PlaceholderText = "https://discord.com/api/webhooks/..."
-    WebhookInput.PlaceholderColor3 = Color3.fromRGB(100, 100, 120)
-    WebhookInput.Text = loadWebhook()
-    WebhookInput.TextColor3 = Color3.fromRGB(220, 220, 220)
-    WebhookInput.TextSize = 12
-    WebhookInput.Font = Enum.Font.Gotham
-    WebhookInput.TextXAlignment = Enum.TextXAlignment.Left
+    WebhookInput.PlaceholderText  = "https://discord.com/api/webhooks/..."
+    WebhookInput.PlaceholderColor3 = Color3.fromRGB(90, 90, 110)
+    WebhookInput.Text             = savedUrl   -- FIX: pre-filled from file
+    WebhookInput.TextColor3       = Color3.fromRGB(220, 220, 220)
+    WebhookInput.TextSize         = 11
+    WebhookInput.Font             = Enum.Font.Gotham
+    WebhookInput.TextXAlignment   = Enum.TextXAlignment.Left
     WebhookInput.ClearTextOnFocus = false
+    WebhookInput.ClipsDescendants = true
 
-    -- Save Button
-    local SaveBtn = Instance.new("TextButton", Main)
-    SaveBtn.Size = UDim2.new(1, -20, 0, 36)
-    SaveBtn.Position = UDim2.new(0, 10, 0, 144)
-    SaveBtn.BackgroundColor3 = Color3.fromRGB(60, 200, 100)
-    SaveBtn.Text = "💾  Save Webhook"
-    SaveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    SaveBtn.TextSize = 14
-    SaveBtn.Font = Enum.Font.GothamBold
-    SaveBtn.BorderSizePixel = 0
+    -- ── Save button ──────────────────────────────
+    local SaveBtn = Instance.new("TextButton", Body)
+    SaveBtn.Size             = UDim2.new(1, -20, 0, 36)
+    SaveBtn.Position         = UDim2.new(0, 10, 0, 122)
+    SaveBtn.BackgroundColor3 = Color3.fromRGB(50, 180, 90)
+    SaveBtn.Text             = "💾  Save Webhook"
+    SaveBtn.TextColor3       = Color3.new(1,1,1)
+    SaveBtn.TextSize         = 13
+    SaveBtn.Font             = Enum.Font.GothamBold
+    SaveBtn.BorderSizePixel  = 0
     Instance.new("UICorner", SaveBtn).CornerRadius = UDim.new(0, 8)
 
     SaveBtn.MouseButton1Click:Connect(function()
-        local url = WebhookInput.Text
-        if url:find("discord.com/api/webhooks") then
+        local url = WebhookInput.Text:gsub("%s+", "")
+        if url:find("discord.com/api/webhooks/") then
             saveWebhook(url)
-            StatusLabel.Text = "✅ Connected!"
+            StatusLabel.Text      = "✅ Webhook saved!"
             StatusLabel.TextColor3 = Color3.fromRGB(60, 200, 100)
-            InputStroke.Color = Color3.fromRGB(60, 200, 100)
+            InputStroke.Color     = Color3.fromRGB(60, 200, 100)
         else
-            StatusLabel.Text = "❌ Invalid webhook URL"
+            StatusLabel.Text      = "❌ Invalid — must be a Discord webhook URL"
             StatusLabel.TextColor3 = Color3.fromRGB(200, 60, 60)
-            InputStroke.Color = Color3.fromRGB(200, 60, 60)
+            InputStroke.Color     = Color3.fromRGB(200, 60, 60)
         end
     end)
 
-    -- Test Button
-    local TestBtn = Instance.new("TextButton", Main)
-    TestBtn.Size = UDim2.new(1, -20, 0, 26)
-    TestBtn.Position = UDim2.new(0, 10, 0, 186)
-    TestBtn.BackgroundTransparency = 1
-    TestBtn.Text = "🔔  Test Webhook"
-    TestBtn.TextColor3 = Color3.fromRGB(100, 160, 255)
-    TestBtn.TextSize = 13
-    TestBtn.Font = Enum.Font.GothamBold
-    TestBtn.BorderSizePixel = 0
+    -- ── Test button ──────────────────────────────
+    local TestBtn = Instance.new("TextButton", Body)
+    TestBtn.Size             = UDim2.new(0.5, -14, 0, 30)
+    TestBtn.Position         = UDim2.new(0, 10, 0, 166)
+    TestBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 42)
+    TestBtn.Text             = "🔔  Test"
+    TestBtn.TextColor3       = Color3.fromRGB(100, 160, 255)
+    TestBtn.TextSize         = 12
+    TestBtn.Font             = Enum.Font.GothamBold
+    TestBtn.BorderSizePixel  = 0
+    Instance.new("UICorner", TestBtn).CornerRadius = UDim.new(0, 8)
+    local testStroke = Instance.new("UIStroke", TestBtn)
+    testStroke.Color     = Color3.fromRGB(100, 160, 255)
+    testStroke.Thickness = 1
 
     TestBtn.MouseButton1Click:Connect(function()
         if WEBHOOK_URL ~= "" then
-            testWebhook()
-            StatusLabel.Text = "📨 Test sent!"
-            StatusLabel.TextColor3 = Color3.fromRGB(100, 160, 255)
+            TestBtn.Text = "⏳ Sending..."
+            task.spawn(function()
+                local ok = testWebhook()
+                TestBtn.Text           = ok and "✅ Sent!" or "❌ Failed"
+                StatusLabel.Text       = ok and "✅ Connected & working!" or "❌ Test failed — check URL"
+                StatusLabel.TextColor3 = ok
+                    and Color3.fromRGB(60, 200, 100)
+                    or  Color3.fromRGB(200, 60, 60)
+                task.wait(3)
+                TestBtn.Text = "🔔  Test"
+            end)
         else
-            StatusLabel.Text = "❌ Save a webhook first!"
+            StatusLabel.Text       = "❌ Save a webhook first!"
             StatusLabel.TextColor3 = Color3.fromRGB(200, 60, 60)
         end
     end)
 
+    -- ── Force scan button ────────────────────────
+    local ForceBtn = Instance.new("TextButton", Body)
+    ForceBtn.Size             = UDim2.new(0.5, -14, 0, 30)
+    ForceBtn.Position         = UDim2.new(0.5, 4, 0, 166)
+    ForceBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 42)
+    ForceBtn.Text             = "🔍  Force Scan"
+    ForceBtn.TextColor3       = Color3.fromRGB(255, 180, 60)
+    ForceBtn.TextSize         = 12
+    ForceBtn.Font             = Enum.Font.GothamBold
+    ForceBtn.BorderSizePixel  = 0
+    Instance.new("UICorner", ForceBtn).CornerRadius = UDim.new(0, 8)
+    local forceStroke = Instance.new("UIStroke", ForceBtn)
+    forceStroke.Color     = Color3.fromRGB(255, 180, 60)
+    forceStroke.Thickness = 1
+
+    ForceBtn.MouseButton1Click:Connect(function()
+        ForceBtn.Text = "⏳ Scanning..."
+        task.spawn(function()
+            -- reset state so everything fires fresh
+            lastSeedStock  = {}
+            lastGearStock  = {}
+            lastPropsStock = {}
+            lastWeather    = {}
+            local ok, err = pcall(function()
+                scanSeedShop()
+                scanGearShop()
+                scanPropsShop()
+                scanWeather()
+            end)
+            ScanLabel.Text      = "🔍 Force scan: " .. os.date("%X")
+            ForceBtn.Text       = ok and "✅ Done!" or "❌ Error"
+            task.wait(3)
+            ForceBtn.Text = "🔍  Force Scan"
+        end)
+    end)
+
+    -- ── Scan interval label ──────────────────────
+    local IntervalLabel = Instance.new("TextLabel", Body)
+    IntervalLabel.Size             = UDim2.new(1, -20, 0, 16)
+    IntervalLabel.Position         = UDim2.new(0, 10, 0, 206)
+    IntervalLabel.BackgroundTransparency = 1
+    IntervalLabel.Text             = "⏱️ Auto-scanning every " .. SCAN_INTERVAL .. "s  |  Shops: Seed · Gear · Props · Weather"
+    IntervalLabel.TextColor3       = Color3.fromRGB(100, 100, 120)
+    IntervalLabel.TextSize         = 10
+    IntervalLabel.Font             = Enum.Font.Gotham
+    IntervalLabel.TextXAlignment   = Enum.TextXAlignment.Left
+
+    -- pre-fill status if webhook already loaded
     if WEBHOOK_URL ~= "" then
-        StatusLabel.Text = "✅ Connected!"
+        StatusLabel.Text       = "✅ Webhook loaded from file"
         StatusLabel.TextColor3 = Color3.fromRGB(60, 200, 100)
-        InputStroke.Color = Color3.fromRGB(60, 200, 100)
+        InputStroke.Color      = Color3.fromRGB(60, 200, 100)
     end
+
+    -- expose ScanLabel for the loop to update
+    return ScanLabel
 end
 
 -- ================================================
 -- START
+-- FIX 5: loop is tied to scanningActive flag
 -- ================================================
-createGui()
-print("[GAG2 Notifier] Started! Scanning every " .. SCAN_INTERVAL .. "s")
+local ScanLabel = createGui()
+scanningActive  = true
 
-while true do
+print("[GAG2 Notifier v2] Started! Scanning every " .. SCAN_INTERVAL .. "s")
+
+while scanningActive do
     local ok, err = pcall(function()
         scanSeedShop()
         scanGearShop()
         scanPropsShop()
         scanWeather()
     end)
-    if not ok then warn("[GAG2 Notifier] Scan error: " .. tostring(err)) end
+    if not ok then
+        warn("[GAG2 Notifier] Scan error: " .. tostring(err))
+    end
+    if ScanLabel and ScanLabel.Parent then
+        ScanLabel.Text = "🔍 Last scan: " .. os.date("%X")
+            .. (ok and "" or "  ⚠️ error")
+    end
     task.wait(SCAN_INTERVAL)
 end
+
+print("[GAG2 Notifier v2] Stopped.")
