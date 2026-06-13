@@ -1,7 +1,8 @@
 -- ================================================
 --          GAG2 STOCK NOTIFIER v2
 --    Seed | Gear | Props | Weather
---    Fixed: HTTP, UI, drag, minimize, loop control
+--    Fixed: HTTP, UI, drag, minimize, loop control,
+--           weather active detection, role pings
 -- ================================================
 
 -- ================================================
@@ -42,7 +43,6 @@ local ROLE_PINGS = {
     ["Rainbow"]            = "<@&YOUR_ROLE_ID>",
 }
 
-local DEFAULT_PING  = "@everyone"
 local SCAN_INTERVAL = 15
 
 -- ================================================
@@ -90,19 +90,33 @@ end
 
 -- ================================================
 -- WEBHOOK SENDER
+-- pingNames = single string OR table of item names
+-- Collects all unique role pings for the batch,
+-- deduplicates them, and puts them at the top.
+-- If an item has no role set, it is silently skipped
+-- (no @everyone fallback).
 -- ================================================
-local function getPing(name)
-    if not name or name == "" then return DEFAULT_PING end
-    return ROLE_PINGS[name] or DEFAULT_PING
+local function buildPingContent(pingNames)
+    if not pingNames or pingNames == "" then return nil end
+    local names = type(pingNames) == "table" and pingNames or {pingNames}
+    local seen, parts = {}, {}
+    for _, name in ipairs(names) do
+        local role = ROLE_PINGS[name]
+        if role and role ~= "" and not seen[role] then
+            seen[role] = true
+            table.insert(parts, role)
+        end
+    end
+    return #parts > 0 and table.concat(parts, " ") or nil
 end
 
-local function sendWebhook(title, description, color, pingName)
+local function sendWebhook(title, description, color, pingNames)
     if WEBHOOK_URL == "" then
         warn("[GAG2 Notifier] No webhook URL set!")
         return false
     end
     local data = {
-        content = getPing(pingName or ""),
+        content = buildPingContent(pingNames),
         embeds = {{
             title       = title,
             description = description,
@@ -126,7 +140,7 @@ local function testWebhook()
     return sendWebhook(
         "✅ GAG2 Notifier v2 Connected!",
         "Webhook is working! You will now receive stock & weather alerts.",
-        3066993, ""
+        3066993, {}
     )
 end
 
@@ -200,14 +214,15 @@ local function scanSeedShop()
 
     if #restocked > 0 then
         local desc = "**Next Restock:** " .. restockTime .. "\n\n"
-        local color, pingName = 5763719, ""
+        local color = 5763719
+        local pingNames = {}
         for _, item in ipairs(restocked) do
             desc = desc .. "🌱 **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color    = getColor(item.rarity)
-            pingName = item.name
+            color = getColor(item.rarity)
+            table.insert(pingNames, item.name)
         end
-        sendWebhook("🌱 Seed Shop Restocked!", desc, color, pingName)
+        sendWebhook("🌱 Seed Shop Restocked!", desc, color, pingNames)
     end
 end
 
@@ -251,14 +266,15 @@ local function scanGearShop()
 
     if #restocked > 0 then
         local desc = "**Next Restock:** " .. restockTime .. "\n\n"
-        local color, pingName = 5763719, ""
+        local color = 5763719
+        local pingNames = {}
         for _, item in ipairs(restocked) do
             desc = desc .. "⚙️ **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color    = getColor(item.rarity)
-            pingName = item.name
+            color = getColor(item.rarity)
+            table.insert(pingNames, item.name)
         end
-        sendWebhook("⚙️ Gear Shop Restocked!", desc, color, pingName)
+        sendWebhook("⚙️ Gear Shop Restocked!", desc, color, pingNames)
     end
 end
 
@@ -302,14 +318,15 @@ local function scanPropsShop()
 
     if #restocked > 0 then
         local desc = "**Next Restock:** " .. restockTime .. "\n\n"
-        local color, pingName = 5763719, ""
+        local color = 5763719
+        local pingNames = {}
         for _, item in ipairs(restocked) do
             desc = desc .. "🏠 **" .. item.name .. "**\n"
             desc = desc .. "💰 " .. item.cost .. "  |  📦 " .. item.stock .. "  |  ⭐ " .. item.rarity .. "\n\n"
-            color    = getColor(item.rarity)
-            pingName = item.name
+            color = getColor(item.rarity)
+            table.insert(pingNames, item.name)
         end
-        sendWebhook("🏠 Props Shop Restocked!", desc, color, pingName)
+        sendWebhook("🏠 Props Shop Restocked!", desc, color, pingNames)
     end
 end
 
@@ -329,22 +346,28 @@ local function scanWeather()
     if not frame then return end
 
     for _, item in pairs(frame:GetChildren()) do
+        if not item:IsA("Frame") and not item:IsA("ImageLabel") then continue end
+
         local nameLabel = item:FindFirstChild("Weather")
         local timeLabel = item:FindFirstChild("Time")
         if not nameLabel or not timeLabel then continue end
 
-        local name     = nameLabel.Text
-        local time     = timeLabel.Text
-        local isActive = time ~= "0s" and time ~= "" and time ~= "0m 0s"
+        local name = nameLabel.Text
+        local time = timeLabel.Text
+
+        -- stricter active check:
+        -- 1. the item itself must be Visible
+        -- 2. the time label must be non-empty and non-zero
+        local hasTime = time ~= "" and time ~= "0s" and time ~= "0m 0s" and time ~= "0m" and time ~= "00:00"
+        local isActive = item.Visible and hasTime
 
         if isActive and not lastWeather[name] then
-            -- weather just started → send alert
             local emoji = weatherEmojis[name] or "🌤️"
             local desc  = emoji .. " **" .. name .. "** is now active!\n⏱️ Duration: **" .. time .. "**"
-            sendWebhook(emoji .. " Weather Alert: " .. name .. "!", desc, 15844367, name)
+            sendWebhook(emoji .. " Weather Alert: " .. name .. "!", desc, 15844367, {name})
         end
 
-        -- FIX: reset when weather ends so next occurrence re-alerts
+        -- reset when inactive so next occurrence re-alerts
         lastWeather[name] = isActive
     end
 end
